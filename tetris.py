@@ -2,6 +2,14 @@
 import time
 import tkinter as tk
 
+try:
+    from PIL import Image, ImageTk, ImageDraw, ImageFilter
+except ImportError:
+    Image = None
+    ImageTk = None
+    ImageDraw = None
+    ImageFilter = None
+
 CELL = 28
 COLS = 10
 ROWS = 20
@@ -49,6 +57,60 @@ def shade_color(hex_color, factor):
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def generate_background(width, height):
+    if not Image or not ImageDraw:
+        return None
+
+    img = Image.new("RGB", (width, height), "#0b0f16")
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / max(1, height - 1)
+        r = int(10 + 20 * ratio)
+        g = int(14 + 18 * ratio)
+        b = int(24 + 30 * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    rng = random.Random(1337)
+    for _ in range(240):
+        x = rng.randint(0, width - 1)
+        y = rng.randint(0, height - 1)
+        c = rng.randint(160, 230)
+        draw.point((x, y), fill=(c, c, c))
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    for _ in range(8):
+        cx = rng.randint(-80, width - 40)
+        cy = rng.randint(0, height)
+        w = rng.randint(160, 320)
+        h = rng.randint(90, 200)
+        color = rng.choice([(80, 160, 255, 70), (140, 80, 255, 70), (80, 255, 200, 60)])
+        odraw.ellipse([cx, cy, cx + w, cy + h], fill=color)
+
+    if ImageFilter:
+        overlay = overlay.filter(ImageFilter.GaussianBlur(18))
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+    for x in range(0, width, 56):
+        draw.line([(x, 0), (x, height)], fill=(20, 30, 45))
+    for y in range(0, height, 56):
+        draw.line([(0, y), (width, y)], fill=(20, 30, 45))
+
+    for _ in range(6):
+        x0 = rng.randint(-60, width - 60)
+        y0 = rng.randint(0, height)
+        x1 = x0 + rng.randint(140, 320)
+        y1 = y0 + rng.randint(-80, 80)
+        color = rng.choice([(70, 200, 255), (120, 90, 255), (90, 255, 200)])
+        draw.line([(x0, y0), (x1, y1)], fill=color, width=2)
+
+    black = Image.new("RGB", img.size, (0, 0, 0))
+    img = Image.blend(img, black, 0.5)
+
+    return img
+
+
 class Tetris:
     def __init__(self, root, on_close=None, owns_root=True):
         self.root = root
@@ -84,6 +146,12 @@ class Tetris:
         self.soft_drop_interval = 0.05
         self.last_drop = time.monotonic()
         self.soft_drop_active = False
+        self.flash_rows = []
+        self.flash_ticks = 0
+        self.flash_duration = 10
+
+        self.bg_photo = None
+        self.prepare_background()
 
         self.current = self.new_piece()
         self.next_piece = self.new_piece()
@@ -93,6 +161,13 @@ class Tetris:
         self.tick()
 
         self.root.protocol("WM_DELETE_WINDOW", self.handle_close)
+
+    def prepare_background(self):
+        if not ImageTk:
+            return
+        img = generate_background(CANVAS_W, CANVAS_H)
+        if img:
+            self.bg_photo = ImageTk.PhotoImage(img)
 
     def bind_inputs(self):
         self.root.bind("<Left>", lambda e: self.move(-1, 0))
@@ -166,10 +241,6 @@ class Tetris:
     def stop_soft_drop(self, _event):
         self.soft_drop_active = False
 
-    def soft_drop(self):
-        if not self.move(0, 1):
-            self.lock_piece()
-
     def hard_drop(self):
         if self.game_over:
             return
@@ -185,10 +256,20 @@ class Tetris:
             for c, val in enumerate(row):
                 if not val:
                     continue
+                ny = piece["y"] + r
+                if ny < 0:
+                    self.end_game()
+                    return
+
+        for r, row in enumerate(piece["shape"]):
+            for c, val in enumerate(row):
+                if not val:
+                    continue
                 nx = piece["x"] + c
                 ny = piece["y"] + r
                 if ny >= 0:
                     self.grid[ny][nx] = piece["color"]
+
         self.clear_lines()
         self.current = self.next_piece
         self.next_piece = self.new_piece()
@@ -198,21 +279,22 @@ class Tetris:
             self.draw()
 
     def clear_lines(self):
-        new_grid = []
-        cleared = 0
-        for row in self.grid:
-            if all(cell is not None for cell in row):
-                cleared += 1
-            else:
-                new_grid.append(row)
-        for _ in range(cleared):
+        cleared_rows = [i for i, row in enumerate(self.grid) if all(cell is not None for cell in row)]
+        if not cleared_rows:
+            return
+
+        new_grid = [row for i, row in enumerate(self.grid) if i not in cleared_rows]
+        for _ in range(len(cleared_rows)):
             new_grid.insert(0, [None for _ in range(COLS)])
-        if cleared:
-            self.grid = new_grid
-            self.lines += cleared
-            self.score += LINE_SCORES.get(cleared, cleared * 200)
-            self.level = 1 + self.lines // 10
-            self.drop_interval = max(0.08, self.base_interval - (self.level - 1) * 0.05)
+
+        self.grid = new_grid
+        self.lines += len(cleared_rows)
+        self.score += LINE_SCORES.get(len(cleared_rows), len(cleared_rows) * 200)
+        self.level = 1 + self.lines // 10
+        self.drop_interval = max(0.08, self.base_interval - (self.level - 1) * 0.05)
+
+        self.flash_rows = cleared_rows
+        self.flash_ticks = self.flash_duration
 
     def end_game(self):
         self.game_over = True
@@ -230,6 +312,8 @@ class Tetris:
         self.drop_interval = self.base_interval
         self.last_drop = time.monotonic()
         self.soft_drop_active = False
+        self.flash_rows = []
+        self.flash_ticks = 0
         self.current = self.new_piece()
         self.next_piece = self.new_piece()
         if self.overlay:
@@ -260,6 +344,10 @@ class Tetris:
             if not self.move(0, 1):
                 self.lock_piece()
             self.last_drop = now
+
+        if self.flash_ticks > 0:
+            self.flash_ticks -= 1
+
         self.draw()
         self.root.after(16, self.tick)
 
@@ -429,9 +517,26 @@ class Tetris:
             text="Esc: back to menu",
         )
 
+    def draw_line_flash(self):
+        if self.flash_ticks <= 0 or not self.flash_rows:
+            return
+        glow = shade_color(ACCENT, 1.4)
+        hot = shade_color(ACCENT, 1.8)
+
+        for row in self.flash_rows:
+            y0 = self.board_y + row * CELL
+            y1 = y0 + CELL
+            x0 = self.board_x + 2
+            x1 = self.board_x + BOARD_W - 2
+            self.canvas.create_rectangle(x0, y0 + 2, x1, y1 - 2, outline=glow, width=2)
+            self.canvas.create_line(x0, (y0 + y1) // 2, x1, (y0 + y1) // 2, fill=hot, width=2)
+
     def draw(self):
         self.canvas.delete("all")
-        self.canvas.create_rectangle(0, 0, CANVAS_W, CANVAS_H, fill=BG_COLOR, outline="")
+        if self.bg_photo:
+            self.canvas.create_image(0, 0, image=self.bg_photo, anchor="nw")
+        else:
+            self.canvas.create_rectangle(0, 0, CANVAS_W, CANVAS_H, fill=BG_COLOR, outline="")
 
         self.draw_board()
 
@@ -456,6 +561,7 @@ class Tetris:
                 self.current["color"],
             )
 
+        self.draw_line_flash()
         self.draw_hud()
 
     def show_game_over(self):
