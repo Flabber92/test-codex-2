@@ -32,11 +32,20 @@ def main():
     else:
         print("Pillow is not installed; background image disabled.")
 
-    def start_game():
-        root.destroy()
-        import tetris
+    def restore_menu():
+        root.deiconify()
+        root.lift()
+        root.focus_force()
 
-        tetris.main()
+    def start_game():
+        root.withdraw()
+        try:
+            import tetris
+
+            tetris.main(parent=root, on_close=restore_menu)
+        except Exception as exc:
+            restore_menu()
+            messagebox.showerror("Error", f"Failed to start Tetris: {exc}")
 
     title_label = tk.Label(
         root,
